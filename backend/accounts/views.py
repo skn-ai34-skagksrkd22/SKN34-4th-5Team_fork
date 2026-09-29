@@ -9,10 +9,11 @@ from django.contrib.auth.hashers import check_password, make_password
 from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.mail import send_mail
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import NotAuthenticated, Throttled, ValidationError
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema
 from rest_framework_simplejwt.views import TokenBlacklistView, TokenObtainPairView, TokenRefreshView
 from django.db import IntegrityError, transaction
@@ -27,6 +28,7 @@ from .serializers import (
     MemberUserSerializer,
     MemberUserUpdateSerializer,
     PasswordUpdateRequestSerializer,
+    PublicMemberSerializer,  
     ResetPasswordSerializer,
     SendEmailSerializer,
     SignInRequestSerializer,
@@ -188,6 +190,41 @@ def get_user(request):
         user = serializer.save()
     return Response(MemberUserSerializer(user).data, status=status.HTTP_200_OK)
 
+@extend_schema(
+    responses={
+        200: PublicMemberSerializer,
+        404: {"type": "object"},
+    },
+    auth=[{"jwtAuth": []}],
+)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_public_user(request, member_id):
+    """
+    다른 회원의 공개 활동 페이지에 필요한 최소 회원 정보를 조회합니다.
+
+    Url:
+        GET /api/v1/auth/users/{member_id}/public/
+
+    Return:
+        - id
+        - nickname
+        - activityVisible
+    """
+
+    # 탈퇴/비활성 회원은 존재하지 않는 회원과 동일하게 처리
+    user = User.objects.filter(
+        pk=member_id,
+        is_active=True,
+    ).first()
+
+    if not user:
+        return Response(
+            {"detail": "사용자를 찾을 수 없습니다."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    return Response(PublicMemberSerializer(user).data)
 
 def _throttle(kind, value, seconds=60):
     key = f"auth:{kind}:{hashlib.sha256(value.casefold().encode()).hexdigest()}"

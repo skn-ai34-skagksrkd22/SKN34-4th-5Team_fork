@@ -1,6 +1,6 @@
 from .admin_views import MemberList, MemberRole
 from django.urls import path
-from .views import LogoutView, RefreshView, SignInView, change_password, get_user, request_email_change, request_username, set_password, signup, verify_email_change
+from .views import LogoutView, RefreshView, SignInView, change_password, get_public_user, get_user, request_email_change, request_username, set_password, signup, verify_email_change
 
 """
     Django 직접 호출과 Nginx 경유 모두 /api/v1/auth/입니다.
@@ -22,6 +22,7 @@ urlpatterns = [
     path("password/request", change_password, name="password_request"),
     path("password", set_password, name="password_reset"),
     path("user", get_user, name="auth_user"),
+    path("users/<int:member_id>/public/", get_public_user, name="auth_public_user",),  # 다른 회원의 공개 활동 정보 조회
     path("username/request", request_username, name="username_request"),
     path("email/request", request_email_change, name="email_request"),
     path("email/verify", verify_email_change, name="email_verify"),

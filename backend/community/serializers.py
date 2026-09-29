@@ -201,7 +201,32 @@ class CommunityCommentSerializer(serializers.ModelSerializer):
     def get_author(self, comment) -> str:
         return comment.author.nickname or comment.author.username
 
+@extend_schema_serializer(component_name="CommunityMemberComment")
+class CommunityMemberCommentSerializer(serializers.ModelSerializer):
+    """
+    회원 활동 페이지에서 사용하는 댓글 응답입니다.
 
+    일반 댓글 API보다 원문 게시글 정보를 추가로 제공합니다.
+    """
+
+    createdAt = serializers.DateTimeField(source="created_at",read_only=True,)
+    postId = serializers.CharField(source="post.source_id",read_only=True,)
+    postTitle = serializers.CharField(source="post.title",read_only=True,)
+    board = serializers.CharField(source="post.board",read_only=True,)
+    teamCode = serializers.CharField(source="post.team_code",read_only=True,)
+    class Meta:
+        model = CommunityComment
+        fields = (
+            "id",
+            "content",
+            "createdAt",
+            "postId",
+            "postTitle",
+            "board",
+            "teamCode",
+        )
+        read_only_fields = fields
+        
 @extend_schema_serializer(component_name="CommunityVoteWrite")
 class CommunityVoteWriteSerializer(serializers.Serializer):
     vote = serializers.ChoiceField(choices=("up", "down"), allow_null=True)

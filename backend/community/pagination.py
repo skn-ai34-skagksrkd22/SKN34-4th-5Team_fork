@@ -83,3 +83,15 @@ class CommunityPostPageSerializer(serializers.Serializer):
     next = serializers.CharField(allow_null=True)
     previous = serializers.CharField(allow_null=True)
     results = CommunityPostSerializer(many=True)
+
+class CommunityCommentPagination(PublicPageNumberPagination):
+    """
+    회원 댓글 활동 목록용 pagination입니다.
+
+    기본 20개이며 기존 게시글 pagination 정책과 동일하게
+    page_size로 최대 100개까지 요청할 수 있습니다.
+    """
+
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100

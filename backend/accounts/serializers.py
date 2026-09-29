@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
-from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.utils import extend_schema_field, extend_schema_serializer
 from rest_framework.validators import UniqueValidator
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
@@ -210,7 +210,30 @@ class MemberUserSerializer(MemberUserUpdateSerializer):
     class Meta(MemberUserUpdateSerializer.Meta):
         read_only_fields = MemberUserUpdateSerializer.Meta.fields
 
+@extend_schema_serializer(component_name="PublicMember")
+class PublicMemberSerializer(serializers.ModelSerializer):
+    """
+    다른 회원의 공개 활동 페이지에서 사용할 최소 회원 정보입니다.
 
+    - 개인정보 노출을 막기 위해 필요한 값만 반환합니다.
+    - visibility 전체 객체는 반환하지 않습니다.
+    """
+    nickname = serializers.SerializerMethodField()
+    activityVisible = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ("id", "nickname", "activityVisible")
+        read_only_fields = fields
+
+    def get_nickname(self, obj):
+        # 기존 커뮤니티 작성자 표시 규칙과 동일하게 처리
+        return obj.nickname or obj.username
+
+    def get_activityVisible(self, obj):
+        # visibility.posts가 없으면 비공개로 처리
+        return bool((obj.visibility or {}).get("posts", False))
+    
 class PasswordUpdateRequestSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True, required=False, max_length=128, trim_whitespace=False)
     new_password = serializers.CharField(write_only=True, required=False, max_length=128, trim_whitespace=False)

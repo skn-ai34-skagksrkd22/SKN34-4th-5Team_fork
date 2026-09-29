@@ -3,7 +3,7 @@ from django.urls import path
 from .admin_views import AdminPostDetail, AdminPostList, AdminReportAction, AdminReportList
 from .drafts import CommunityDraftDetailView, CommunityDraftListCreateView
 from .images import CommunityImageDetailView, CommunityImageUploadView
-from .interactions import CommentDetailView, CommentListCreateView, ReportCreateView, VoteView
+from .interactions import CommentDetailView, CommentListCreateView, MemberCommentListView, ReportCreateView, VoteView
 from .predictions import prediction_game_detail, prediction_game_list, prediction_game_vote
 from .publishing import CommunityDraftPublishView
 from .views import CommunityPostDetailView, CommunityPostListCreateView
@@ -20,6 +20,7 @@ urlpatterns = [
     path("posts/", CommunityPostListCreateView.as_view(), name="community-post-list"),
     path("posts/<str:source_id>/", CommunityPostDetailView.as_view(), name="community-post-detail"),
     path("posts/<str:source_id>/comments/", CommentListCreateView.as_view()),
+    path("comments/", MemberCommentListView.as_view(), name="community-member-comments",), # 특정 회원이 작성한 댓글 목록
     path("comments/<int:comment_id>/", CommentDetailView.as_view()),
     path("posts/<str:source_id>/vote/", VoteView.as_view()),
     path("posts/<str:source_id>/reports/", ReportCreateView.as_view()),

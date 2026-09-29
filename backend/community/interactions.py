@@ -1,9 +1,10 @@
 from django.db import transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
+from django.contrib.auth import get_user_model
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, OpenApiTypes, extend_schema
 from rest_framework import serializers, status
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -12,12 +13,16 @@ from .models import CommunityComment, CommunityPost, CommunityReport, CommunityV
 from .serializers import (
     CommunityCommentSerializer,
     CommunityCommentWriteSerializer,
+    CommunityMemberCommentSerializer,  # 추가
     CommunityReportResultSerializer,
     CommunityReportWriteSerializer,
     CommunityVoteStateSerializer,
     CommunityVoteWriteSerializer,
 )
 
+from .pagination import CommunityCommentPagination
+
+User = get_user_model()
 
 def _vote_counts(post):
     return post.votes.aggregate(
@@ -66,6 +71,109 @@ class CommentListCreateView(APIView):
         CommunityPost.objects.filter(pk=post.pk).update(comment_count=post.comments.count())
         return Response(CommunityCommentSerializer(comment).data, status=status.HTTP_201_CREATED)
 
+class MemberCommentListView(APIView):
+    """
+    특정 회원이 작성한 댓글을 조회합니다.
+
+    GET /api/v1/community/comments/?author_id=21&page=1&page_size=20
+
+    - 로그인 사용자만 조회 가능
+    - 본인은 공개 설정과 관계없이 조회 가능
+    - 다른 회원은 visibility.posts=True인 경우만 조회 가능
+    - 비활성/존재하지 않는 회원은 404
+    - 숨겨진 게시글의 댓글은 조회하지 않음
+    """
+
+    permission_classes = (IsAuthenticated,)
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                "author_id",
+                OpenApiTypes.INT,
+                required=True,
+                description="댓글 작성자 회원 ID",
+            ),
+            OpenApiParameter(
+                "page",
+                OpenApiTypes.INT,
+                required=False,
+            ),
+            OpenApiParameter(
+                "page_size",
+                OpenApiTypes.INT,
+                required=False,
+            ),
+        ],
+        responses={
+            200: CommunityMemberCommentSerializer(many=True),
+            400: OpenApiTypes.OBJECT,
+            401: OpenApiTypes.OBJECT,
+            403: OpenApiTypes.OBJECT,
+            404: OpenApiTypes.OBJECT,
+        },
+    )
+    def get(self, request):
+        author_id = request.query_params.get("author_id")
+
+        # author_id가 없거나 양의 정수가 아니면 잘못된 요청
+        if (
+            not author_id
+            or not author_id.isascii()
+            or not author_id.isdigit()
+            or author_id.startswith("0")
+        ):
+            raise serializers.ValidationError(
+                {"author_id": "author_id는 양의 정수여야 합니다."}
+            )
+
+        # 비활성 회원은 존재하지 않는 회원과 동일하게 처리
+        target_user = User.objects.filter(
+            pk=int(author_id),
+            is_active=True,
+        ).first()
+
+        if not target_user:
+            raise NotFound("사용자를 찾을 수 없습니다.")
+
+        # 본인은 공개 여부와 관계없이 자신의 댓글을 조회할 수 있음
+        # 다른 회원은 활동 공개 설정이 켜져 있어야 조회 가능
+        if (
+            target_user.id != request.user.id
+            and not bool((target_user.visibility or {}).get("posts", False))
+        ):
+            raise PermissionDenied("공개하지 않은 활동입니다.")
+
+        # 숨겨진 게시글의 댓글은 회원 활동 목록에서도 제외
+        comments = (
+            CommunityComment.objects
+            .select_related("author", "post")
+            .filter(
+                author=target_user,
+                post__is_hidden=False,
+            )
+            .order_by("-created_at", "-id")
+        )
+
+        # 기존 공개 pagination 형식 사용
+        paginator = CommunityCommentPagination()
+        page = paginator.paginate_queryset(
+            comments,
+            request,
+            view=self,
+        )
+
+        serializer = CommunityMemberCommentSerializer(
+            page if page is not None else comments,
+            many=True,
+        )
+
+        # page/page_size가 전달된 경우:
+        # {count, next, previous, results} 형태로 반환
+        if page is not None:
+            return paginator.get_paginated_response(serializer.data)
+
+        return Response(serializer.data)
 
 class CommentDetailView(APIView):
     permission_classes = (IsAuthenticated,)

@@ -1,5 +1,6 @@
 from django.db import DataError, IntegrityError, transaction
 from django.db.models import Count, F, Q
+from django.contrib.auth import get_user_model
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, OpenApiTypes, PolymorphicProxySerializer, extend_schema, extend_schema_view
 from rest_framework import generics, status
 from rest_framework.exceptions import NotAuthenticated, PermissionDenied, ValidationError
@@ -13,6 +14,7 @@ from .serializers import CommunityPostPatchSerializer, CommunityPostSerializer, 
 
 POST_INPUT_FIELDS = ("board", "team_code", "category", "title", "content", "content_doc")
 
+User = get_user_model()
 
 def post_queryset():
     return CommunityPost.objects.prefetch_related("images").annotate(
@@ -32,10 +34,13 @@ def same_submission(post, validated_data):
             OpenApiParameter("board", OpenApiTypes.STR, enum=("free", "teams")),
             OpenApiParameter("team", OpenApiTypes.STR),
             OpenApiParameter("mine", OpenApiTypes.STR, enum=("1",)),
-            OpenApiParameter("page", {"type": "integer", "minimum": 1, "maximum": 2_147_483_647}),
-            OpenApiParameter("page_size", {"type": "integer", "minimum": 1, "maximum": 100}),
+
+            # 특정 회원이 작성한 게시글 조회
+            OpenApiParameter("author_id", OpenApiTypes.INT, description="작성자 회원 ID", required=False,),
+            OpenApiParameter("page", {"type": "integer", "minimum": 1, "maximum": 2_147_483_647},),
+            OpenApiParameter("page_size", {"type": "integer", "minimum": 1, "maximum": 100},),
             OpenApiParameter("q", {"type": "string", "maxLength": 200}),
-            OpenApiParameter("search_field", OpenApiTypes.STR, enum=("all", "title", "author")),
+            OpenApiParameter("search_field", OpenApiTypes.STR, enum=("all", "title", "author"),),
         ],
         responses={
             200: PolymorphicProxySerializer(
@@ -80,12 +85,49 @@ class CommunityPostListCreateView(generics.ListCreateAPIView):
             if board == "free":
                 raise ValidationError({"team": "팀 필터는 teams 게시판에서만 사용할 수 있습니다."})
             queryset = queryset.filter(team_code=team)
+            
+        author_id = self.request.query_params.get("author_id")
+
         if mine is not None:
             if mine != "1":
                 raise ValidationError({"mine": "mine은 1만 사용할 수 있습니다."})
+
             if not self.request.user.is_authenticated:
                 raise NotAuthenticated()
+
             queryset = queryset.filter(owner=self.request.user)
+
+        # 특정 회원이 작성한 게시글 조회
+        if author_id is not None:
+            if (
+                not author_id.isascii()
+                or not author_id.isdigit()
+                or author_id.startswith("0")
+            ):
+                raise ValidationError(
+                    {"author_id": "author_id는 양의 정수여야 합니다."}
+                )
+
+            if not self.request.user.is_authenticated:
+                raise NotAuthenticated()
+
+            target_user = User.objects.filter(
+                pk=int(author_id),
+                is_active=True,
+            ).first()
+
+            if not target_user:
+                from rest_framework.exceptions import NotFound
+                raise NotFound("사용자를 찾을 수 없습니다.")
+
+            if (
+                target_user.id != self.request.user.id
+                and not bool((target_user.visibility or {}).get("posts", False))
+            ):
+                raise PermissionDenied("공개하지 않은 활동입니다.")
+
+            queryset = queryset.filter(owner=target_user)
+            
         if board is not None:
             queryset = queryset.filter(board=board)
         if query.q:
