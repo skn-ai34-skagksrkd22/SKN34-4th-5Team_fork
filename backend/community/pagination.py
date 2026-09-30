@@ -95,3 +95,11 @@ class CommunityCommentPagination(PublicPageNumberPagination):
     page_size = 20
     page_size_query_param = "page_size"
     max_page_size = 100
+    
+    def paginate_queryset(self, queryset, request, view=None):
+        # page 또는 page_size를 요청한 경우에만 페이지네이션 적용
+        # 둘 다 없으면 기존처럼 전체 댓글 목록을 반환
+        if "page" not in request.query_params and "page_size" not in request.query_params:
+            return None
+
+        return super().paginate_queryset(queryset, request, view)

@@ -51,6 +51,7 @@ def same_submission(post, validated_data):
             ),
             400: OpenApiTypes.OBJECT,
             401: OpenApiTypes.OBJECT,
+            403: OpenApiTypes.OBJECT,  # 비공개 활동 조회 시 403
             404: OpenApiTypes.OBJECT,
         },
     ),
