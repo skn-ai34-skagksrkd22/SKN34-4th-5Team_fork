@@ -48,6 +48,7 @@ ChatService 쪽 변경은 import 1줄 + chain 고르는 1줄이 전부다.
 LangSmith: backend/.env 에 LANGSMITH_TRACING=true · LANGSMITH_API_KEY · LANGSMITH_PROJECT 를 넣으면
            answer() 한 번이 트리 하나로 기록된다. env 가 없으면 오버헤드 0.
 """
+import asyncio
 import contextvars
 import inspect
 import os
@@ -56,7 +57,7 @@ import sys
 from typing import Any, Iterator, Optional
 
 from langchain_core.messages import BaseMessage
-from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 
 try:                                          # langsmith 는 langchain-core 의존성이라 보통 있다
     from langsmith import traceable
@@ -247,6 +248,26 @@ class RagChatChain(Runnable[dict, str]):
                **kwargs) -> Iterator[str]:
         result = yield from dispatcher.stream(**self._args(input))
         _LAST.set(result)
+
+    def astream_events(self, input: Any, config: Optional[RunnableConfig] = None, **kwargs):
+        """ChatService 경로: input["run"] 기록용 dict 를 받아 기존 동기 파이프라인을 worker 스레드에서 돌린다.
+
+        async RunnableLambda + asyncio.to_thread 라 내부 model/tool 호출의 공식 이벤트가 생성 도중에
+        그대로 올라온다. 답변 전문은 run["answer"] 에 남긴다 (사용자에게 흘린 텍스트 그대로).
+        """
+        return RunnableLambda(self._arecord, name=self.name).astream_events(input, config, **kwargs)
+
+    async def _arecord(self, input: dict) -> str:
+        return await asyncio.to_thread(self._record, input)
+
+    def _record(self, input: dict) -> str:
+        from django.db import connections
+        run = input["run"]
+        try:
+            run["answer"] = "".join(dispatcher.stream(**self._args(input), run=run))
+            return run["answer"]
+        finally:
+            connections.close_all()  # worker 스레드가 연 DB 연결은 여기서 닫는다
 
 
 rag_chain = RagChatChain()

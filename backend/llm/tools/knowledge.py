@@ -1,12 +1,13 @@
 """Document retrieval shared by answer agents."""
 import contextvars
+import functools
 import json
 import os
 import re
 from django.db import connection, transaction
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import StructuredTool, tool
+from langchain_core.tools import StructuredTool, ToolException, tool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
@@ -227,13 +228,28 @@ def transform_query(query: str) -> str:
 
 search_context: contextvars.ContextVar[dict] = contextvars.ContextVar("venue_search_context")
 
+def _tool_error(function):
+    """예외가 SIMPLE 턴 전체를 깨지 않도록 status=error ToolMessage로 바꾼다."""
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except ToolException:
+            raise
+        except Exception as exc:
+            raise ToolException(f"[조회 실패] 문서 검색 중 오류가 발생했습니다: {type(exc).__name__}") from None
+    return wrapped
+
 @tool
+@_tool_error
 def search_documents_tool(query: str) -> str:
     """구장 안팎 문서(먹거리·편의시설·교통·포토존·주변 맛집)에서 질문과 관련된 근거를 검색한다."""
     ctx = search_context.get({})
     result = search_documents(query, ctx.get("slots", {}))
     ctx["last"] = result
     return format_documents(result["documents"])
+
+search_documents_tool.handle_tool_error = True
 
 class SearchInput(BaseModel):
     query: str = Field(description="검색할 내용 (예: '고척 주차 요금', '보조배터리 반입')")
@@ -284,8 +300,9 @@ def create_knowledge_tools():
     return (
         search_documents_tool,
         StructuredTool.from_function(
-            search_kbo_documents, name="search_kbo_documents", args_schema=SearchInput,
+            _tool_error(search_kbo_documents), name="search_kbo_documents", args_schema=SearchInput,
             description=search_kbo_documents.__doc__,
             handle_validation_error="도구 인자 형식이 올바르지 않습니다. 설명을 보고 다시 부르세요.",
+            handle_tool_error=True,
         ),
     )

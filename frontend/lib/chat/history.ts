@@ -7,10 +7,13 @@ export function commitChatLoad(signal: AbortSignal, isCurrent: () => boolean, co
   return true;
 }
 
-// The server returns every stored row in sequence_no order, including pending questions from an
-// interrupted stream and failed assistant rows that hold only a partial answer.
+// The server returns every stored item in canonical turn order (project_history); preserve that
+// order as-is, do not re-sort by id. A turn with no answer (pending/failed/stopped before any
+// reply) has only the user row, which then carries that turn's tools; once answered, tools move
+// to the assistant row and the user row's tools are empty.
 export function restoreChatMessages(history: ChatMessageDto[]): ChatMessage[] {
-  return [...history]
-    .sort((left, right) => left.sequence_no - right.sequence_no)
-    .map(item => ({ id: item.id, role: item.role, content: item.content, status: item.status }));
+  return history.map(item => ({
+    id: item.id, role: item.role, content: item.content, status: item.status,
+    ...(item.tools.length ? { tools: item.tools.map(tool => ({ id: tool.id, toolName: tool.tool_name, status: tool.status })) } : {}),
+  }));
 }

@@ -8,20 +8,20 @@ Response(list/dict) 를 항상 JSONRenderer 로 위임해야 한다. 이전에�
 
 실제 LLM/OpenAI 호출 없음: GET 목록 조회 경로만 다루므로 send_message()/체인에 도달하지 않는다.
 """
-from django.test import TestCase
 from rest_framework.test import APIClient
 
-from llm.models import ChatMessage, ChatSession
+from llm.models import ChatSession
+from llm.tests.test_v2_chat import CheckpointTestCase, seed
 
 
-class SSEAcceptGetListRegressionTest(TestCase):
+class SSEAcceptGetListRegressionTest(CheckpointTestCase):
     """Accept: text/event-stream + 성공 GET 목록 조회 -> 유효한 JSON 바디."""
 
     def setUp(self):
         self.client_a = APIClient()
         self.client_a.cookies["guest_id"] = "e0e0e0e0-e0e0-e0e0-e0e0-e0e0e0e0e0e0"
         self.session = ChatSession.objects.create(guest="e0e0e0e0-e0e0-e0e0-e0e0-e0e0e0e0e0e0")
-        ChatMessage.objects.create(session=self.session, sequence_no=1, message="hello")
+        seed(self.session, ("hello", "hi"))
 
     def test_get_list_with_sse_accept_returns_valid_json_not_broken_body(self):
         response = self.client_a.get(
@@ -32,8 +32,7 @@ class SSEAcceptGetListRegressionTest(TestCase):
         self.assertEqual(response["Content-Type"], "application/json")
         body = response.json()
         self.assertIsInstance(body, list)
-        self.assertEqual(len(body), 1)
-        self.assertEqual(body[0]["content"], "hello")
+        self.assertEqual([item["content"] for item in body], ["hello", "hi"])
 
     def test_get_list_prestream_404_with_sse_accept_returns_valid_json(self):
         response = self.client_a.get(
@@ -57,7 +56,7 @@ class SSEAcceptGetListRegressionTest(TestCase):
         from django.http import StreamingHttpResponse
         from unittest.mock import patch
 
-        with patch("llm.views.message.send_message", return_value=iter([("token", "hi")])):
+        with patch("llm.service.chat_v2.send_message", return_value=iter([("delta", {"text": "hi"})])):
             response = self.client_a.post(
                 f"/api/v2/chat/sessions/{self.session.id}/messages/",
                 data={"content": "hello"},

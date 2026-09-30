@@ -84,7 +84,7 @@ class ChatRoomDetailView(
     URL: /api/v2/chat/sessions/<session_id>/
     
     PATCH: 대화방 정보를 수정합니다.
-    DELETE: 대화방을 삭제합니다.
+    DELETE: 대화방을 삭제합니다. 대화 checkpoint 는 commit 뒤 지운다(llm.apps 의 post_delete outbox, 실패 시 재시도).
     """
 
     permission_classes = [AllowAny]

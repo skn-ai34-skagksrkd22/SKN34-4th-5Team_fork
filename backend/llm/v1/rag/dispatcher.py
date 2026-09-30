@@ -177,27 +177,40 @@ def _origin_course(kind: str, origin: dict | None) -> bool:
     return bool(origin) and kind == "course" and course.READY
 
 
+def _whole(text: str, run: dict | None) -> str:
+    """모델 스트림이 없는 답(scope·출발지 코스·폴백)을 공개 답변 이벤트로 알리고 그대로 돌려준다."""
+    if run is not None:
+        from langchain_core.callbacks import dispatch_custom_event
+        from llm.serializer.message import ANSWER_TEXT_EVENT
+        dispatch_custom_event(ANSWER_TEXT_EVENT, text)
+    return text
+
+
 def stream(question: str, history: list[dict] | None = None, stadium_name: str | None = None,
-           intent: str | None = None, origin: dict | None = None):
-    """assistant의 마지막 provider 응답만 흘리고 완료 메타데이터를 반환한다."""
+           intent: str | None = None, origin: dict | None = None, run: dict | None = None):
+    """assistant의 마지막 provider 응답만 흘리고 완료 메타데이터를 반환한다.
+
+    run: ChatService 기록용 dict (assistant.stream_answer 참고). 있으면 모델 없이 한 번에 나오는
+    답은 공개 답변 이벤트로도 한 번 알린다(모델 답변은 answer_run_id 스트림으로 나간다).
+    """
     history = history or []
     hint = stadium_code_from_name(stadium_name)
     kind = route(question, intent)
     if kind == "scope":
         result = {"answer": persona.FIXED["scope"], "sources": [], "route": "dispatcher:scope", "places": []}
-        yield result["answer"]
+        yield _whole(result["answer"], run)
         return result
     if _origin_course(kind, origin):
         result = _domain_answer(kind, question, history, hint, origin)
         result["answer"] = persona.finalize(result["answer"])
-        yield result["answer"]
+        yield _whole(result["answer"], run)
         result.setdefault("places", [])
         result.setdefault("coursePayload", None)
         return result
     emitted = False
     try:
         with operation("phase", "assistant"):
-            stream = assistant.stream_answer(question, history=history, hint_stadium=hint)
+            stream = assistant.stream_answer(question, history=history, hint_stadium=hint, run=run)
             while True:
                 try:
                     chunk = next(stream)
@@ -215,7 +228,7 @@ def stream(question: str, history: list[dict] | None = None, stadium_name: str |
         result = _domain_answer(kind, question, history, hint, origin)
         result["route"] = f"agent:error>{result['route']}"
         result["answer"] = persona.finalize(result["answer"])
-        yield result["answer"]
+        yield _whole(result["answer"], run)
     result.setdefault("places", [])
     result.setdefault("coursePayload", None)
     return result

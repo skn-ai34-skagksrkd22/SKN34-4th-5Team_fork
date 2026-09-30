@@ -11,13 +11,13 @@
 실제 LLM/OpenAI 호출 없음: 이 파일의 모든 테스트는 스트림 시작 전에 막히는 경로만
 다루므로 send_message()/체인까지 도달하지 않는다.
 """
-from django.test import TestCase
 from rest_framework.test import APIClient
 
 from llm.models import ChatSession
+from llm.tests.test_v2_chat import CheckpointTestCase
 
 
-class SSEAcceptPrestreamErrorRendererTest(TestCase):
+class SSEAcceptPrestreamErrorRendererTest(CheckpointTestCase):
     """Accept: text/event-stream + 프리스트림 검증 실패 -> 유효한 JSON 에러 바디."""
 
     def setUp(self):
@@ -67,7 +67,7 @@ class SSEAcceptPrestreamErrorRendererTest(TestCase):
         self.assertEqual(response["Content-Type"], "application/json")
 
 
-class ContentBoundaryValidationTest(TestCase):
+class ContentBoundaryValidationTest(CheckpointTestCase):
     """content/message_id 경계값이 (이미 있는 DRF 동작으로) 막히는지 회귀 고정."""
 
     def setUp(self):
@@ -94,9 +94,8 @@ class ContentBoundaryValidationTest(TestCase):
         self.assertIn("content", response.json())
 
     def test_huge_message_id_on_delete_resolves_to_404_not_500(self):
-        # bigint PK 범위를 훨씬 넘는 정수도 psycopg가 그대로 바인딩하고 Postgres가 그냥
-        # "없음"으로 답한다 - DoesNotExist -> service 계층에서 이미 Http404로 통일되어 있어
-        # 500이 아니라 정상적인 404가 나오는지 못박아둔다.
+        # message_id 는 UUIDField 라 정수는 UUID(int=...) 로 바뀐다 (2**128 미만이면 유효).
+        # 그런 id 의 사용자 메시지는 없으므로 service 계층의 Http404 로 404 가 나와야 한다.
         response = self.client_a.delete(
             f"/api/v2/chat/sessions/{self.session.id}/messages/",
             data={"message_id": 10 ** 30},

@@ -1,15 +1,7 @@
 .chat-progress { display: grid; gap: 6px; min-width: 0; margin: 0 0 14px; padding: 9px 12px; border: 1px solid #e3ebf7; border-radius: 12px; background: #f8faff; color: #647b9a; list-style: none; }
-.chat-progress li { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 6px; min-width: 0; font-size: 11px; line-height: 1.6; }
+.chat-progress li { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 6px; min-width: 0; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .chat-progress li > span:first-child { color: #5785c8; text-align: center; font-weight: 700; }
-.chat-progress li > div { min-width: 0; }
-.chat-progress li code { min-width: 0; color: #496580; font-size: 10px; overflow-wrap: anywhere; }
-.chat-progress details { margin-top: 3px; }
-.chat-progress details summary { cursor: pointer; font-size: 10px; }
-.chat-progress details code, .chat-progress details strong { display: block; margin-top: 4px; }
-.chat-progress details pre { max-height: 180px; margin: 4px 0 0; padding: 7px; border-radius: 6px; overflow: auto; background: #eef3fb; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.chat-progress details small { display: block; margin-top: 4px; white-space: normal; }
 .chat-progress li.is-failed > span:first-child { color: #ba715e; }
-.chat-progress li.is-interrupted > span:first-child, .chat-progress li.is-unknown > span:first-child { color: #8f98a5; }
 .chat-workspace .chat-progress { margin-left: 34px; }
 @media (max-width: 767px) { .chat-workspace .chat-progress { margin-left: 0; } }
 @media (prefers-reduced-motion: reduce) { .chat-progress, .chat-progress * { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }

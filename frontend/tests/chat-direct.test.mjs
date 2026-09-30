@@ -39,14 +39,18 @@ const sse = events => new Response(new ReadableStream({
     controller.close();
   },
 }), { headers: { "Content-Type": "text/event-stream; charset=utf-8" } });
-// Session ids are UUIDs, message ids are integers; done.message_id is the saved assistant id as a digit string.
+// Session ids and message ids are server-issued UUID strings (LangChain BaseMessage.id).
 const SESSION = "3f2c1a4e-8b7d-4c21-9e0f-5a6b7c8d9e01";
 const OTHER_SESSION = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+const USER_MSG = 1;
+const ASSISTANT_MSG = 2;
+const OTHER_MSG = 3;
 const room = (id = SESSION, title = "첫 질문") => ({ id, title, created_at: "2026-09-28T00:00:00Z", updated_at: "2026-09-28T00:00:00Z" });
-const row = (id, sequence_no, role, content, status = "completed") => ({ id, sequence_no, role, content, status, tools: [], created_at: "2026-09-28T00:00:00Z", updated_at: "2026-09-28T00:00:00Z" });
-const answerEvents = (chunks = ["첫 ", "답변"], messageId = "12") => [
+const row = (id, role, content, status = "completed", tools = []) => ({ id, sequence_no: id, role, content, status, tools, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" });
+const tool = (id, tool_name, status) => ({ id, tool_name, status });
+const answerEvents = (chunks = ["첫 ", "답변"], messageId = ASSISTANT_MSG, tools = []) => [
   ...chunks.map(text => ["delta", { text }]),
-  ["done", { message_id: messageId, assistant_message: chunks.join("") }],
+  ["done", { message_id: String(messageId), assistant_message: chunks.join(""), tools }],
 ];
 const record = calls => async (url, init = {}) => {
   const call = { url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(init.body) : undefined, headers: new Headers(init.headers), credentials: init.credentials };
@@ -76,7 +80,7 @@ test("member send creates a UUID session then streams v2 delta/done with Bearer 
   const reply = await sendChatMessage("member", { content: "  첫 질문 ", context: { stadium: "잠실야구장", intent: "route", origin: { lat: 37.5, lng: 127.07 } } }, undefined, { onDelta: value => seen.push(value) });
   assert.deepEqual(seen, ["첫 ", "첫 답변"]);
   assert.deepEqual({ reply: reply.reply, sessionId: reply.sessionId, assistant: reply.assistantMessageId, provider: reply.provider },
-    { reply: "첫 답변", sessionId: SESSION, assistant: 12, provider: "backend" });
+    { reply: "첫 답변", sessionId: SESSION, assistant: ASSISTANT_MSG, provider: "backend" });
   assert.deepEqual(calls.map(call => [call.method, call.url]), [
     ["GET", "/api/v2/chat/sessions/"], ["POST", "/api/v2/chat/sessions/"], ["POST", `/api/v2/chat/sessions/${SESSION}/messages/`],
   ]);
@@ -94,8 +98,8 @@ test("guest session is cookie-owned: no Authorization, no credentials override, 
     const call = await log(url, init);
     if (call.url === "/api/v2/chat/sessions/" && call.method === "POST") { cookieIssued = true; return json(room(SESSION, "비회원 질문"), 201); }
     if (call.url === "/api/v2/chat/sessions/") return json(cookieIssued ? [room(SESSION, "비회원 질문")] : []);
-    if (call.method === "GET") return json([row(1, 1, "user", "비회원 질문"), row(2, 2, "assistant", "비회원 답")]);
-    return sse(answerEvents(["비회원 ", "답"], "2"));
+    if (call.method === "GET") return json([row(USER_MSG, "user", "비회원 질문"), row(ASSISTANT_MSG, "assistant", "비회원 답")]);
+    return sse(answerEvents(["비회원 ", "답"], ASSISTANT_MSG));
   };
   assert.deepEqual(await listChatSessions("guest"), []);
   const reply = await sendChatMessage("guest", { content: "비회원 질문" });
@@ -106,8 +110,8 @@ test("guest session is cookie-owned: no Authorization, no credentials override, 
   assert.deepEqual(sessions.map(item => item.id), [SESSION]);
   const restored = restoreChatMessages(await fetchChatHistory("guest", sessions[0].id));
   assert.deepEqual(restored, [
-    { id: 1, role: "user", content: "비회원 질문", status: "completed" },
-    { id: 2, role: "assistant", content: "비회원 답", status: "completed" },
+    { id: USER_MSG, role: "user", content: "비회원 질문", status: "completed" },
+    { id: ASSISTANT_MSG, role: "assistant", content: "비회원 답", status: "completed" },
   ]);
   assert.ok(calls.every(call => call.headers.get("Authorization") === null && call.credentials === undefined));
   assert.ok(calls.every(call => call.url.startsWith("/api/v2/chat/sessions/")));
@@ -116,74 +120,112 @@ test("guest session is cookie-owned: no Authorization, no credentials override, 
 test("edit PUTs message_id and content, then streams the regenerated answer", async () => {
   saveMemberTokens("access-token", "refresh-token");
   const calls = [], log = record(calls);
-  global.fetch = async (url, init = {}) => { await log(url, init); return sse(answerEvents(["고친 ", "답"], "31")); };
-  const reply = await editChatMessage("member", { sessionId: SESSION, messageId: 21, content: "고친 질문", context: { intent: "baseball" } });
+  global.fetch = async (url, init = {}) => { await log(url, init); return sse(answerEvents(["고친 ", "답"], OTHER_MSG)); };
+  const reply = await editChatMessage("member", { sessionId: SESSION, messageId: USER_MSG, content: "고친 질문", context: { intent: "baseball" } });
   assert.deepEqual([calls[0].method, calls[0].url], ["PUT", `/api/v2/chat/sessions/${SESSION}/messages/`]);
-  assert.deepEqual(calls[0].body, { message_id: 21, content: "고친 질문", context: { intent: "baseball" } });
-  assert.deepEqual({ reply: reply.reply, id: reply.assistantMessageId }, { reply: "고친 답", id: 31 });
-  await assert.rejects(editChatMessage("member", { sessionId: SESSION, messageId: 0, content: "x" }), error => error instanceof ChatClientError && error.status === 400);
+  assert.deepEqual(calls[0].body, { message_id: USER_MSG, content: "고친 질문", context: { intent: "baseball" } });
+  assert.deepEqual({ reply: reply.reply, id: reply.assistantMessageId }, { reply: "고친 답", id: OTHER_MSG });
+  await assert.rejects(editChatMessage("member", { sessionId: SESSION, messageId: "not-a-uuid", content: "x" }), error => error instanceof ChatClientError && error.status === 400);
 });
 
 test("delete truncates with a DELETE body and accepts the empty 204", async () => {
   const calls = [], log = record(calls);
   global.fetch = async (url, init = {}) => {
     const call = await log(url, init);
-    if (call.body?.message_id === 99) return json({ detail: "No ChatMessage matches the given query." }, 404);
+    if (call.body?.message_id === OTHER_MSG) return json({ detail: "No ChatMessage matches the given query." }, 404);
     return new Response(null, { status: 204 });
   };
-  assert.equal(await deleteChatMessages("guest", SESSION, 21), undefined);
-  assert.deepEqual([calls[0].method, calls[0].url, calls[0].body], ["DELETE", `/api/v2/chat/sessions/${SESSION}/messages/`, { message_id: 21 }]);
+  assert.equal(await deleteChatMessages("guest", SESSION, USER_MSG), undefined);
+  assert.deepEqual([calls[0].method, calls[0].url, calls[0].body], ["DELETE", `/api/v2/chat/sessions/${SESSION}/messages/`, { message_id: USER_MSG }]);
   assert.equal(calls[0].headers.get("Content-Type"), "application/json");
-  await assert.rejects(deleteChatMessages("guest", SESSION, 99), error => error instanceof ChatClientError && error.status === 404 && !error.uncertain);
+  await assert.rejects(deleteChatMessages("guest", SESSION, OTHER_MSG), error => error instanceof ChatClientError && error.status === 404 && !error.uncertain);
 });
 
-test("session rename/delete/history use UUID paths and validate the current DTOs", async () => {
+test("session rename/delete/history use UUID paths, stopped status and tool calls in the current DTOs", async () => {
   saveMemberTokens("access-token", "refresh-token");
   const calls = [], log = record(calls);
   global.fetch = async (url, init = {}) => {
     const call = await log(url, init);
     if (call.method === "DELETE") return new Response(null, { status: 204 });
     if (call.method === "PATCH") return json(room(SESSION, call.body.title));
-    return json([row(5, 2, "assistant", "답"), row(4, 1, "user", "질문", "failed")]);
+    return json([
+      row(USER_MSG, "user", "질문", "stopped"),
+      row(ASSISTANT_MSG, "assistant", "답", "completed", [tool("call-1", "search_places", "completed")]),
+    ]);
   };
   assert.equal((await renameChatSession("member", SESSION, "이름")).title, "이름");
   const history = await fetchChatHistory("member", SESSION);
-  assert.deepEqual(restoreChatMessages(history).map(item => [item.id, item.role, item.status]), [[4, "user", "failed"], [5, "assistant", "completed"]]);
+  assert.deepEqual(restoreChatMessages(history).map(item => [item.id, item.role, item.status]), [[USER_MSG, "user", "stopped"], [ASSISTANT_MSG, "assistant", "completed"]]);
+  assert.deepEqual(restoreChatMessages(history)[1].tools, [{ id: "call-1", toolName: "search_places", status: "completed" }]);
   assert.equal(await deleteChatSession("member", SESSION), undefined);
   assert.deepEqual(calls.map(call => [call.method, call.url]), [
     ["PATCH", `/api/v2/chat/sessions/${SESSION}/`], ["GET", `/api/v2/chat/sessions/${SESSION}/messages/`], ["DELETE", `/api/v2/chat/sessions/${SESSION}/`],
   ]);
   assert.ok(calls.every(call => call.headers.get("Authorization") === "Bearer access-token"));
   await assert.rejects(fetchChatHistory("member", "7"), error => error instanceof ChatClientError && error.status === 400);
-  global.fetch = async () => json([{ id: 7, title: "숫자 id 는 옛 계약" }]);
+  global.fetch = async () => json([{ id: "not-a-uuid-but-string-is-fine", title: 5 }]);
   await assert.rejects(listChatSessions("member"), error => error instanceof ChatClientError && error.status === 502);
-  global.fetch = async () => json([{ ...row(1, 1, "human", "옛 역할") }]);
+  global.fetch = async () => json([{ ...row(USER_MSG, "human", "옛 역할") }]);
+  await assert.rejects(fetchChatHistory("member", SESSION), error => error instanceof ChatClientError && error.status === 502);
+  global.fetch = async () => json([{ ...row(USER_MSG, "user", "내부 상태", "cancelled") }]);
+  await assert.rejects(fetchChatHistory("member", SESSION), error => error instanceof ChatClientError && error.status === 502);
+  global.fetch = async () => json([{ ...row("42", "user", "숫자 ID") }]);
+  await assert.rejects(fetchChatHistory("member", SESSION), error => error instanceof ChatClientError && error.status === 502);
+  global.fetch = async () => json([{ ...row("not-a-uuid", "user", "잘못된 ID") }]);
   await assert.rejects(fetchChatHistory("member", SESSION), error => error instanceof ChatClientError && error.status === 502);
 });
 
-test("stream error frame is a known failure, not an uncertain delivery", async () => {
+test("tool SSE events are accepted and reach onTool with id/tool_name/status; done carries the final tools array", async () => {
+  const seenTools = [];
+  global.fetch = async () => sse([
+    ["tool", tool("call-1", "search_places", "running")],
+    ["delta", { text: "답변 " }],
+    ["tool", tool("call-1", "search_places", "completed")],
+    ["delta", { text: "완성" }],
+    ["done", { message_id: String(ASSISTANT_MSG), assistant_message: "답변 완성", tools: [tool("call-1", "search_places", "completed")] }],
+  ]);
+  const reply = await sendChatMessage("guest", { sessionId: SESSION, content: "질문" }, undefined, { onTool: value => seenTools.push(value) });
+  assert.deepEqual(seenTools, [tool("call-1", "search_places", "running"), tool("call-1", "search_places", "completed")]);
+  assert.deepEqual(reply.tools, [{ id: "call-1", toolName: "search_places", status: "completed" }]);
+});
+
+test("a done frame with a non-integer or empty message_id is rejected as uncertain", async () => {
+  global.fetch = async () => sse([["delta", { text: "답" }], ["done", { message_id: "22222222-2222-4222-8222-222222222222", assistant_message: "답", tools: [] }]]);
+  await assert.rejects(sendChatMessage("guest", { sessionId: SESSION, content: "질문" }), error => error instanceof ChatClientError && error.uncertain);
+  global.fetch = async () => sse([["delta", { text: "답" }], ["done", { message_id: "", assistant_message: "답", tools: [] }]]);
+  await assert.rejects(sendChatMessage("guest", { sessionId: SESSION, content: "질문" }), error => error instanceof ChatClientError && error.uncertain);
+});
+
+test("a tool frame with an unknown status or missing id/tool_name is rejected as uncertain", async () => {
+  global.fetch = async () => sse([["tool", { id: "call-1", tool_name: "search_places", status: "unknown" }]]);
+  await assert.rejects(sendChatMessage("guest", { sessionId: SESSION, content: "질문" }), error => error instanceof ChatClientError && error.uncertain);
+  global.fetch = async () => sse([["tool", { id: "", tool_name: "search_places", status: "running" }]]);
+  await assert.rejects(sendChatMessage("guest", { sessionId: SESSION, content: "질문" }), error => error instanceof ChatClientError && error.uncertain);
+});
+
+test("stream error frame is uncertain: the final save may or may not have committed", async () => {
   global.fetch = async () => sse([["delta", { text: "부분" }], ["error", { detail: "답변 생성에 실패했습니다. 다시 시도해 주세요." }]]);
   await assert.rejects(sendChatMessage("guest", { sessionId: SESSION, content: "질문" }), error =>
-    error instanceof ChatClientError && error.message === "답변 생성에 실패했습니다. 다시 시도해 주세요." && !error.uncertain && error.sessionId === SESSION);
+    error instanceof ChatClientError && error.message === "답변 생성에 실패했습니다. 다시 시도해 주세요." && error.uncertain && error.sessionId === SESSION);
 });
 
 test("stream that closes without done or error (superseded by edit/delete) is reported, never shown as saved", async () => {
   global.fetch = async () => sse([["delta", { text: "지워진 턴" }]]);
   await assert.rejects(sendChatMessage("guest", { sessionId: SESSION, content: "질문" }), error =>
     error instanceof ChatClientError && error.uncertain && /연결이 끊겼/.test(error.message));
-  global.fetch = async () => sse([["delta", { text: "답" }], ["done", { message_id: 12, assistant_message: "답" }]]);
+  global.fetch = async () => sse([["delta", { text: "답" }], ["done", { message_id: String(ASSISTANT_MSG), assistant_message: "답" }]]);
   await assert.rejects(sendChatMessage("guest", { sessionId: SESSION, content: "질문" }), error => error instanceof ChatClientError && /최종 답변/.test(error.message));
   global.fetch = async () => sse([["checkpoint", { turn_id: "old", receipt: "x" }]]);
   await assert.rejects(sendChatMessage("guest", { sessionId: SESSION, content: "질문" }), error => error instanceof ChatClientError && /알 수 없는/.test(error.message));
 });
 
 test("SSE reader handles split frames and UTF-8 boundaries", async () => {
-  const bytes = new TextEncoder().encode(answerEvents(["잠실 ", "야구장"], "44").map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(""));
+  const bytes = new TextEncoder().encode(answerEvents(["잠실 ", "야구장"], OTHER_MSG).map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(""));
   global.fetch = async () => new Response(new ReadableStream({
     start(stream) { for (let index = 0; index < bytes.length; index += 5) stream.enqueue(bytes.slice(index, index + 5)); stream.close(); },
   }), { headers: { "Content-Type": "text/event-stream" } });
   const reply = await sendChatMessage("guest", { sessionId: SESSION, content: "질문" });
-  assert.deepEqual([reply.reply, reply.assistantMessageId], ["잠실 야구장", 44]);
+  assert.deepEqual([reply.reply, reply.assistantMessageId], ["잠실 야구장", OTHER_MSG]);
 });
 
 test("pre-stream JSON errors surface the DRF detail", async () => {
@@ -261,4 +303,20 @@ test("authenticated chat has no legacy Next cookie relay", () => {
 test("client has no retired v1 guest, turns, finalize or non-stream endpoints", () => {
   const client = readFileSync(join(frontend, "lib/chat/client.ts"), "utf8");
   assert.doesNotMatch(client, /\/api\/v1\/|guest\/|turns|finalize|checkpoint|contextPrefix|credentials|document\.cookie/);
+});
+
+test("LLM streams skip the 55s total timer while plain API calls keep it", async () => {
+  const delays = [];
+  const original = global.window.setTimeout;
+  global.window.setTimeout = (fn, ms) => { delays.push(ms); return original(fn, ms); };
+  try {
+    global.fetch = async (url, init = {}) => (init.method === "GET" ? json([]) : sse(answerEvents()));
+    await sendChatMessage("guest", { sessionId: SESSION, content: "질문" });
+    await editChatMessage("guest", { sessionId: SESSION, messageId: USER_MSG, content: "수정" });
+    assert.deepEqual(delays, []);
+    await listChatSessions("guest");
+    assert.deepEqual(delays, [55_000]);
+  } finally {
+    global.window.setTimeout = original;
+  }
 });

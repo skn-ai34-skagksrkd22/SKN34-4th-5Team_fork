@@ -299,3 +299,19 @@ class ExternalDomainToolAdapterTest(SimpleTestCase):
                 "stadium_code": "JAMSIL", "game_date": "2026-09-16", "game_time": "18:30",
             }), weather)
         get_weather.assert_called_once_with("JAMSIL", "2026-09-16", "18:30")
+
+
+class ToolErrorContractTest(__import__("unittest").TestCase):
+    def test_knowledge_and_schema_tools_return_error_toolmessage(self):
+        from unittest.mock import patch
+        from llm.tools import knowledge, baseball
+        call = lambda t, args: t.invoke({"type": "tool_call", "id": "c1", "name": t.name, "args": args})
+        with patch.object(knowledge, "search_documents", side_effect=RuntimeError("boom")):
+            msg = call(knowledge.search_documents_tool, {"query": "q"})
+        self.assertEqual((msg.status, msg.content[:7]), ("error", "[조회 실패]"))
+        kbo = knowledge.create_knowledge_tools()[1]
+        with patch.object(knowledge, "search_kbo_rows", side_effect=RuntimeError("boom")):
+            self.assertEqual(call(kbo, {"query": "q"}).status, "error")
+        service = type("S", (), {"get_baseball_schema": lambda self: (_ for _ in ()).throw(RuntimeError("x"))})()
+        schema = next(t for t in baseball.create_baseball_tools(service) if t.name == "get_baseball_schema")
+        self.assertEqual(call(schema, {}).status, "error")

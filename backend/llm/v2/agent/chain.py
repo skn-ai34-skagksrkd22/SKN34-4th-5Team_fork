@@ -1,60 +1,65 @@
-from langchain_core.runnables import RunnableBranch, RunnablePassthrough
-from .classifier import guard_question, route_agent
-from llm.enum import AgentType
-from llm.v1.rag.persona import FIXED
-from .baseball_chain import baseball_chain
-from .community_chain import community_chain
-from .course_chain import course_chain
-from .stadium_chain import stadium_chain
-from .travel_chain import travel_chain
+"""상위 StateGraph 조립: jev_router 로 승인/복잡도/capability 를 판정하고 simple/orchestrator 로 분기한다."""
+from functools import cache
 
-# 에이전트 분기 체인
-agent_branch = RunnableBranch(
-    (
-        lambda x: x["route"] == AgentType.BASEBALL.value,
-        baseball_chain,  # 경기 일정 / 결과 / 순위 / 선수 / 야구 규칙
-    ),
-    (
-        lambda x: x["route"] == AgentType.STADIUM.value,
-        stadium_chain,  # 구장 정보 / 티켓 / 가격 / 좌석 / 반입 / 재입장 / 주차 / 시설 / 구장 내 먹거리
-    ),
-    (
-        lambda x: x["route"] == AgentType.TRAVEL.value,
-        travel_chain,  # 구장 주변 맛집 / 카페 / 숙박 / 관광 / 산책 / 공원 / 실내 놀거리 / 편의점
-    ),
-    (
-        lambda x: x["route"] == AgentType.COURSE.value,
-        course_chain,  # 경기 전후 코스 / 하루 일정 / 이동 동선 / 장소 조합
-    ),
-    (
-        lambda x: x["route"] == AgentType.COMMUNITY.value,
-        community_chain,  # 커뮤니티 게시글 / 팬 반응 / 승부예측 / 팬 투표 조회
-    ),
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.graph import END, START, StateGraph
 
-    # 위 어떤 도메인에도 해당하지 않을 때 실행되는 기본 분기
-    lambda _: "처리할 수 없는 요청입니다.",
-)
+from ..middleware.jev_guidelines import SCOPE_MESSAGE
+from . import classifier, orchestrator_chain, simple_chain
+from .common import ORCHESTRATOR_RECURSION_LIMIT, RECURSION_LIMIT, ChainState, invoke_agent
 
-# 메인 체인: 입력 {"question", "chat_history"?, "context"?} → 가드 → 라우팅 → 도메인 에이전트
-# context 는 선택 사항이고 {"stadium", "intent", "origin"} 중 있는 것만 채워져 온다 (없어도 이전과 동일하게 동작).
-chain = (
-    RunnablePassthrough.assign(
-        is_pass=lambda state: guard_question(
-            state["question"], state.get("chat_history"), state.get("context"),
-        )
-    )
-    | RunnableBranch(
-        # PASS면 담당 도메인을 분류해 다음 에이전트 분기로
-        (
-            lambda state: state["is_pass"],
-            RunnablePassthrough.assign(
-                route=lambda state: route_agent(
-                    state["question"], state.get("chat_history"), state.get("context"),
-                )["route"]
-            )
-            | agent_branch, # 분야마다 에이전트를 동적할당
-        ),
-        # else = NON_PASS
-        lambda _: FIXED["scope"],
-    )
-)
+
+def _last_question_and_history(messages):
+    """마지막 HumanMessage 를 이번 질문으로, 그 앞을 history 로 나눈다."""
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            return messages[i].content, messages[:i]
+    return "", messages
+
+
+def jev_router(state):
+    """요청당 JEV 한 번. 거절이면 안내 메시지를 여기서 붙이고 바로 END 로 간다 (별도 노드 없음).
+    분류기 예외는 그대로 올려 모델·도구 실행 없이 실패한다 (fail closed)."""
+    question, history = _last_question_and_history(state["messages"])
+    decision = classifier.classify(question, history, state.get("context"))
+    if decision["allowed"] is not True:
+        return {"decision": decision, "messages": [AIMessage(SCOPE_MESSAGE)]}
+    return {"decision": decision}
+
+
+def _route(state) -> str:
+    decision = state["decision"]
+    if decision["allowed"] is not True:
+        return END
+    return "orchestrator" if decision["complexity"] == "COMPLEX" else "simple_agent"
+
+
+def build_graph(model, tools_by_name):
+    simple_agent = simple_chain.build(model, tools_by_name)
+    orchestrator = orchestrator_chain.build(model, tools_by_name)
+
+    def runner(agent, limit=RECURSION_LIMIT):
+        def run(state):  # 내부 tool/AI 메시지는 부모에 복제하지 않고 최종 공개 답변 하나만 돌려준다
+            return {"messages": [invoke_agent(agent, state, limit)["messages"][-1]]}
+        return run
+
+    graph = StateGraph(ChainState)
+    graph.add_node("jev_router", jev_router)
+    graph.add_node("simple_agent", runner(simple_agent))
+    graph.add_node("orchestrator", runner(orchestrator, ORCHESTRATOR_RECURSION_LIMIT))
+
+    graph.add_edge(START, "jev_router")
+    graph.add_conditional_edges("jev_router", _route, ["simple_agent", "orchestrator", END])
+    graph.add_edge("simple_agent", END)
+    graph.add_edge("orchestrator", END)
+
+    return graph.compile()
+
+
+@cache
+def get_graph():
+    from llm.tools import create_default_tools
+    from llm.tools.knowledge import create_knowledge_tools
+    from .common import llm
+    tools_by_name = {t.name: t for t in (*create_default_tools(), *create_knowledge_tools())}
+    return build_graph(llm(), tools_by_name)

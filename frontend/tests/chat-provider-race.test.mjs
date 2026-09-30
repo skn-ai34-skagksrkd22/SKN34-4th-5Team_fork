@@ -21,7 +21,7 @@ function compile(name) {
   writeFileSync(join(scratch, `${name}.js`), outputText);
 }
 
-for (const name of ["lib/chat/types", "lib/chat/validation", "lib/chat/progress", "lib/chat/history"]) compile(name);
+for (const name of ["lib/chat/types", "lib/chat/validation", "lib/chat/history"]) compile(name);
 mkdirSync(join(scratch, "components"), { recursive: true });
 
 const providerSource = readFileSync(join(frontend, "components/chat-provider.tsx"), "utf8")
@@ -29,7 +29,6 @@ const providerSource = readFileSync(join(frontend, "components/chat-provider.tsx
   .replace('from "next/navigation"', 'from "../test-navigation"')
   .replaceAll('from "@/lib/chat/types"', 'from "../lib/chat/types"')
   .replace('from "@/lib/chat/client"', 'from "../test-chat-client"')
-  .replace('from "@/lib/chat/progress"', 'from "../lib/chat/progress"')
   .replace('from "@/lib/chat/history"', 'from "../lib/chat/history"')
   .replace('from "@/lib/member-auth"', 'from "../test-member-auth"')
   .replace('from "@/lib/client-id"', 'from "../test-client-id"')
@@ -122,8 +121,10 @@ const deferred = () => {
 };
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const FIRST = "3f2c1a4e-8b7d-4c21-9e0f-5a6b7c8d9e01", SECOND = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+const USER_MSG = 1, ASSISTANT_MSG = 2;
+const OLD_MSG = 4;
 const rooms = [{ id: FIRST, title: "첫 대화" }, { id: SECOND, title: "둘째 대화" }];
-const row = (id, sequence_no, role, content, status = "completed") => ({ id, sequence_no, role, content, status, tools: [] });
+const row = (id, role, content, status = "completed", tools = []) => ({ id, sequence_no: id, role, content, status, tools, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" });
 const unused = async () => { throw new Error("not used"); };
 const baseApi = {
   deleteChatMessages: unused, deleteChatSession: unused, editChatMessage: unused, sendChatMessage: unused,
@@ -176,16 +177,16 @@ test("provider ignores delayed list/history callbacks and reloads an interrupted
   controls.onSelectConversation(`member:${SECOND}`);
   controls = runner.render();
   controls.onDraftChange("둘째 방 초안");
-  firstHistory.resolve([row(10, 1, "user", "늦은 첫 기록")]);
+  firstHistory.resolve([row(OLD_MSG, "user", "늦은 첫 기록")]);
   await tick();
   controls = runner.render();
   assert.equal(controls.activeConversationId, `member:${SECOND}`);
   assert.equal(controls.draft, "둘째 방 초안");
 
-  secondHistory.resolve([row(22, 2, "assistant", "둘째 답변"), row(21, 1, "user", "둘째 질문")]);
+  secondHistory.resolve([row(USER_MSG, "user", "둘째 질문"), row(ASSISTANT_MSG, "assistant", "둘째 답변")]);
   await tick();
   controls = runner.render();
-  assert.deepEqual(controls.messages.map(message => [message.id, message.role, message.content]), [[21, "user", "둘째 질문"], [22, "assistant", "둘째 답변"]]);
+  assert.deepEqual(controls.messages.map(message => [message.id, message.role, message.content]), [[USER_MSG, "user", "둘째 질문"], [ASSISTANT_MSG, "assistant", "둘째 답변"]]);
   assert.equal(controls.draft, "둘째 방 초안");
 
   controls.onSelectConversation(`member:${FIRST}`);
@@ -198,7 +199,7 @@ test("guest reload lists cookie-owned sessions and restores history in guest mod
   global.__chatApi = {
     ...baseApi,
     listChatSessions: async mode => { calls.push(["list", mode]); return [rooms[0]]; },
-    fetchChatHistory: async (mode, sessionId) => { calls.push(["history", mode, sessionId]); return [row(1, 1, "user", "비회원 질문"), row(2, 2, "assistant", "비회원 답")]; },
+    fetchChatHistory: async (mode, sessionId) => { calls.push(["history", mode, sessionId]); return [row(USER_MSG, "user", "비회원 질문"), row(ASSISTANT_MSG, "assistant", "비회원 답")]; },
   };
   const runner = hookRunner();
   let controls = runner.render();
@@ -209,6 +210,51 @@ test("guest reload lists cookie-owned sessions and restores history in guest mod
   assert.deepEqual(controls.messages.map(message => message.content), ["비회원 질문", "비회원 답"]);
   assert.ok(calls.some(call => call[0] === "list" && call[1] === "guest"));
   assert.deepEqual(calls.filter(call => call[0] === "history"), [["history", "guest", FIRST]]);
+  global.__memberAuth = { status: "authenticated", user: { id: 7 } };
+});
+
+test("history reload surfaces a stopped turn's status without dropping it", async () => {
+  global.__memberAuth = { status: "authenticated", user: { id: 7 } };
+  global.__chatApi = {
+    ...baseApi,
+    listChatSessions: async () => [rooms[0]],
+    fetchChatHistory: async () => [row(USER_MSG, "user", "질문", "stopped"), row(ASSISTANT_MSG, "assistant", "", "stopped")],
+  };
+  const runner = hookRunner();
+  let controls = runner.render();
+  runner.flushEffects();
+  await tick();
+  controls = runner.render();
+  assert.deepEqual(controls.messages.map(message => [message.id, message.status]), [[USER_MSG, "stopped"], [ASSISTANT_MSG, "stopped"]]);
+});
+
+test("live tool events accumulate into streamingTools by id and clear once the turn settles", async () => {
+  global.__memberAuth = { status: "anonymous", user: null };
+  let onTool;
+  const persisted = [row(USER_MSG, "user", "잠실 맛집 알려 주세요"), row(ASSISTANT_MSG, "assistant", "답변", "completed", [{ id: "call-1", tool_name: "search_places", status: "completed" }])];
+  global.__chatApi = {
+    ...baseApi,
+    listChatSessions: async () => [],
+    fetchChatHistory: async () => persisted,
+    sendChatMessage: (mode, body, signal, callbacks) => { onTool = callbacks.onTool; return new Promise(resolve => {
+      onTool({ id: "call-1", tool_name: "search_places", status: "running" });
+      resolve({ reply: "답변", sessionId: FIRST, provider: "guest", model: "m", ready: true, assistantMessageId: ASSISTANT_MSG, tools: [{ id: "call-1", toolName: "search_places", status: "completed" }] });
+    }); },
+  };
+  const runner = hookRunner();
+  let controls = runner.render();
+  runner.flushEffects();
+  await tick();
+  controls = runner.render();
+  controls.onDraftChange("잠실 맛집 알려 주세요");
+  controls = runner.render();
+  controls.onSend();
+  await tick();
+  controls = runner.render();
+  assert.deepEqual(controls.streamingTools, []);
+  await tick();
+  controls = runner.render();
+  assert.deepEqual(controls.messages.at(-1).tools, [{ id: "call-1", toolName: "search_places", status: "completed" }]);
   global.__memberAuth = { status: "authenticated", user: { id: 7 } };
 });
 

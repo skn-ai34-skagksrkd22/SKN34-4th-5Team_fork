@@ -17,6 +17,7 @@ import logging
 import json
 import os
 import time
+import uuid
 from contextlib import suppress
 from datetime import date
 
@@ -142,8 +143,27 @@ def build_chain(model=None, tool_list=None, retriever=None):
     return RunnableLambda(retriever or retrieve) | RunnableLambda(build_prompt) | agent | RunnableLambda(parse_output)
 
 
-def _stream_answer(question, history=None, hint_stadium=None, *, model=None, tool_list=None, retriever=None):
-    """도구 계획은 숨기고 마지막 provider 응답 청크만 즉시 전달한다."""
+def _run_config(run_id):
+    """기존 config_kwargs() 에 명시적 run_id 를 더한다 (공개 이벤트가 이 id 로 답변/도구를 가린다)."""
+    return {"config": {**config_kwargs().get("config", {}), "run_id": run_id}}
+
+
+def _check_cancelled(run):
+    collector = current()
+    if (run is not None and run.get("cancelled")) or (collector is not None and collector.cancelled):
+        raise ProgressCancelled("chat progress cancelled")
+
+
+def _stream_answer(question, history=None, hint_stadium=None, *, model=None, tool_list=None, retriever=None,
+                   run=None):
+    """도구 계획은 숨기고 마지막 provider 응답 청크만 즉시 전달한다.
+
+    run: ChatService 가 넘기는 기록용 dict (없으면 기존 동작 그대로).
+        run["answer_run_id"]  최종 답변 model.stream 의 run_id
+        run["tool_call_ids"]  실제 실행한 도구 run_id(str) -> tool_call_id 를 여기서 채운다
+        run["messages"]       실제 AIMessage(tool_calls)/ToolMessage 를 순서대로 여기에 쌓는다
+        run["cancelled"]      True 가 되면 다음 모델·도구 실행 전에 멈춘다
+    """
     model = model or llm()
     st = tools.state()
     t0 = time.perf_counter()
@@ -159,6 +179,7 @@ def _stream_answer(question, history=None, hint_stadium=None, *, model=None, too
     seen_calls = {}
 
     for _ in range(MAX_TOOL_CALLS + 1):
+        _check_cancelled(run)
         planner = [SystemMessage(content=f"{conversation[0].content}\n\n{PLANNER_RULE}"), *conversation[1:]]
         response = bound.invoke(planner, **config_kwargs())
         tool_calls = getattr(response, "tool_calls", None) or []
@@ -172,34 +193,58 @@ def _stream_answer(question, history=None, hint_stadium=None, *, model=None, too
             break
         if calls + new_count > MAX_TOOL_CALLS:
             raise ValueError("tool call limit exceeded")
-        conversation.append(response)
-        for call, signature in zip(tool_calls, signatures):
+        # 실행 전에 전부 검사한다: 기록된 도구 요청이 결과 없이 남지 않게.
+        for call in tool_calls:
             name, arguments, call_id = call.get("name"), call.get("args"), call.get("id")
             if name not in allowed or not isinstance(arguments, dict) or not isinstance(call_id, str) or not call_id:
                 raise ValueError("malformed tool call")
+        conversation.append(response)
+        record = run["messages"].append if run is not None else (lambda _m: None)
+        record(response)
+        failure = None
+        for call, signature in zip(tool_calls, signatures):
+            name, call_id = call["name"], call["id"]
             if signature in seen_calls:
-                conversation.append(ToolMessage(
-                    content=seen_calls[signature], tool_call_id=call_id, name=name,
-                ))
+                message = ToolMessage(content=seen_calls[signature], tool_call_id=call_id, name=name)
+                conversation.append(message)
+                record(message)
                 continue
-            output = allowed[name].invoke(call, **config_kwargs())
+            _check_cancelled(run)
+            tool_run_id = uuid.uuid4()
+            if run is not None:
+                run["tool_call_ids"][str(tool_run_id)] = call_id
+            try:
+                output = allowed[name].invoke(call, **_run_config(tool_run_id))
+            except (ProgressCancelled, ProgressStorageError):
+                raise
+            except Exception as exc:
+                # 실제 실패를 기록하고 같은 응답의 나머지 호출도 실행한 뒤 기존처럼 실패시킨다(폴백).
+                # 결과 없이 남은 요청이 완료 턴에 섞이지 않게 하려는 것. 오류 내용은 저장하지 않는다.
+                # 예외 원문·traceback 에 도구 인자가 섞일 수 있어 로그에는 이름/예외 타입만 남긴다.
+                log.warning("assistant tool failed: %s (%s)", name, type(exc).__name__)
+                record(ToolMessage(content="tool error", tool_call_id=call_id, name=name, status="error"))
+                failure = name
+                continue
             message = output if isinstance(output, ToolMessage) else ToolMessage(
                 content=output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str),
                 tool_call_id=call_id, name=name,
             )
             conversation.append(message)
+            record(message)
             seen_calls[signature] = message.content
+        if failure is not None:
+            # 원래 예외를 이어 붙이지 않는다(from None): 상위 log.exception traceback 에 원문이 안 나온다.
+            raise RuntimeError(f"assistant tool failed: {failure}") from None
         calls += new_count
     else:
         raise ValueError("tool call limit exceeded")
 
     provider_stream, answer, size = None, [], 0
     try:
-        provider_stream = model.stream(conversation, **config_kwargs())
+        answer_config = _run_config(run["answer_run_id"]) if run is not None else config_kwargs()
+        provider_stream = model.stream(conversation, **answer_config)
         for chunk in provider_stream:
-            collector = current()
-            if collector is not None and collector.cancelled:
-                raise ProgressCancelled("chat progress cancelled")
+            _check_cancelled(run)
             text = _text(getattr(chunk, "content", chunk))
             if not text:
                 continue
@@ -228,11 +273,12 @@ def _stream_answer(question, history=None, hint_stadium=None, *, model=None, too
     return out
 
 
-def stream_answer(question, history=None, hint_stadium=None, *, model=None, tool_list=None, retriever=None):
+def stream_answer(question, history=None, hint_stadium=None, *, model=None, tool_list=None, retriever=None,
+                  run=None):
     with tools.request_state(hint_stadium, question, history):
         return (yield from _stream_answer(
             question, history=history, hint_stadium=hint_stadium,
-            model=model, tool_list=tool_list, retriever=retriever,
+            model=model, tool_list=tool_list, retriever=retriever, run=run,
         ))
 
 

@@ -2,7 +2,7 @@ import { memberError, memberFetch } from "../member-auth-request";
 import { isRecord, parseChatRequest } from "./validation";
 import type { ChatContext, ChatReply, ChatStatus } from "./types";
 import { MAX_REPLY_LENGTH } from "./types";
-import type { ChatMessageDto, ChatSessionDto } from "./wire";
+import type { ChatMessageDto, ChatSessionDto, ChatToolCallDto } from "./wire";
 
 // Members and guests share one API. Members authenticate with Bearer (memberFetch); guests send no
 // Authorization header and are identified by the server-set HttpOnly guest_id cookie that same-origin
@@ -11,6 +11,8 @@ export type ChatMode = "member" | "guest";
 
 const SESSIONS = "/api/v2/chat/sessions/";
 const REQUEST_TIMEOUT_MS = 55_000;
+const MESSAGE_ID = /^[1-9]\d*$/;
+const isMessageId = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATUS: Record<ChatMode, ChatStatus> = {
   member: { provider: "backend", model: "팀 챗봇", ready: true },
@@ -18,7 +20,7 @@ const STATUS: Record<ChatMode, ChatStatus> = {
 };
 export const GUEST_STATUS = STATUS.guest;
 
-export type ChatStreamCallbacks = { onDelta?: (answer: string) => void };
+export type ChatStreamCallbacks = { onDelta?: (answer: string) => void; onTool?: (tool: ChatToolCallDto) => void };
 export type ChatSendRequest = { sessionId?: string; content: string; context?: ChatContext };
 export type ChatEditRequest = { sessionId: string; messageId: number; content: string; context?: ChatContext };
 
@@ -40,13 +42,14 @@ async function readJson(response: Response): Promise<unknown> {
   return text ? JSON.parse(text) : null;
 }
 
-async function request<T>(mode: ChatMode, path: string, init: RequestInit, signal: AbortSignal | undefined, read: (response: Response) => Promise<T>): Promise<T> {
+async function request<T>(mode: ChatMode, path: string, init: RequestInit, signal: AbortSignal | undefined, read: (response: Response) => Promise<T>, timeoutMs: number | null = REQUEST_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
   signal?.addEventListener("abort", abort, { once: true });
-  const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, REQUEST_TIMEOUT_MS);
+  // LLM 스트림은 총시간 제한 없이 외부 signal로만 중단한다.
+  const timeout = timeoutMs === null ? undefined : window.setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const mutating = init.method !== "GET";
   const fetcher = mode === "member" ? memberFetch : fetch;
   try {
@@ -78,20 +81,24 @@ const sessionPath = (sessionId: string) => {
   return `${SESSIONS}${sessionId}/`;
 };
 const isSession = (value: unknown): value is ChatSessionDto => isRecord(value) && typeof value.id === "string" && UUID.test(value.id) && typeof value.title === "string";
-const isMessage = (value: unknown): value is ChatMessageDto => isRecord(value) && Number.isSafeInteger(value.id) && Number.isSafeInteger(value.sequence_no) &&
+const isTool = (value: unknown): value is ChatToolCallDto => isRecord(value) && typeof value.id === "string" && Boolean(value.id) &&
+  typeof value.tool_name === "string" && Boolean(value.tool_name) && ["running", "completed", "failed"].includes(String(value.status));
+const isMessage = (value: unknown): value is ChatMessageDto => isRecord(value) && isMessageId(value.id) && isMessageId(value.sequence_no) &&
   (value.role === "user" || value.role === "assistant") && typeof value.content === "string" &&
-  ["pending", "completed", "failed", "stopped"].includes(String(value.status));
+  ["pending", "completed", "failed", "stopped"].includes(String(value.status)) &&
+  Array.isArray(value.tools) && value.tools.every(isTool) && typeof value.created_at === "string" && typeof value.updated_at === "string";
 // DELETE answers 204 with no body.
 const readEmpty = async (response: Response) => { await response.text(); };
 
-// Frames are `event: <name>\ndata: <json>\n\n` (backend/llm/views/sse.py): delta{text}* then done{message_id, assistant_message}
-// or error{detail}. A stream that closes with neither means the turn was superseded or the connection dropped.
-async function readStream(response: Response, sessionId: string, callbacks: ChatStreamCallbacks): Promise<{ reply: string; assistantMessageId: number }> {
+// Frames are `event: <name>\ndata: <json>\n\n` (backend/llm/views/sse.py): delta{text}* / tool{id,
+// tool_name, status}* then done{message_id, assistant_message, tools} or error{detail}. A stream
+// that closes with neither means the turn was superseded or the connection dropped.
+async function readStream(response: Response, sessionId: string, callbacks: ChatStreamCallbacks): Promise<{ reply: string; assistantMessageId: number; tools: ChatToolCallDto[] }> {
   if (!response.body || !response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
     throw new ChatClientError("스트림 응답을 확인하지 못했어요.", 502, true, sessionId);
   }
   const reader = response.body.getReader(), decoder = new TextDecoder();
-  let buffer = "", answer = "", result: { reply: string; assistantMessageId: number } | null = null;
+  let buffer = "", answer = "", result: { reply: string; assistantMessageId: number; tools: ChatToolCallDto[] } | null = null;
   const consume = (frame: string) => {
     const [eventLine, ...lines] = frame.split(/\r?\n/);
     const event = eventLine?.startsWith("event:") ? eventLine.slice(6).trim() : "";
@@ -105,16 +112,23 @@ async function readStream(response: Response, sessionId: string, callbacks: Chat
       callbacks.onDelta?.(answer);
       return;
     }
+    if (event === "tool") {
+      if (!isTool(value)) throw new ChatClientError("도구 호출 정보를 확인하지 못했어요.", 502, true, sessionId);
+      callbacks.onTool?.(value);
+      return;
+    }
     if (event === "done") {
-      if (typeof value.message_id !== "string" || !/^[1-9]\d*$/.test(value.message_id) || typeof value.assistant_message !== "string") {
+      if (typeof value.message_id !== "string" || !MESSAGE_ID.test(value.message_id) || !isMessageId(Number(value.message_id)) || typeof value.assistant_message !== "string" ||
+        !Array.isArray(value.tools) || !value.tools.every(isTool)) {
         throw new ChatClientError("최종 답변을 확인하지 못했어요.", 502, true, sessionId);
       }
-      result = { reply: value.assistant_message, assistantMessageId: Number(value.message_id) };
+      result = { reply: value.assistant_message, assistantMessageId: Number(value.message_id), tools: value.tools };
       return;
     }
     if (event === "error") {
-      // The server already stored this turn as failed, so the outcome is known.
-      throw new ChatClientError(typeof value.detail === "string" && value.detail && value.detail.length <= 200 ? value.detail : fallback(502), 502, false, sessionId);
+      // The stream failed after the server attempted the turn; the final save may or may not have
+      // committed, so the client can't assume persistence failed and must reconcile via history.
+      throw new ChatClientError(typeof value.detail === "string" && value.detail && value.detail.length <= 200 ? value.detail : fallback(502), 502, true, sessionId);
     }
     throw new ChatClientError("알 수 없는 스트림 응답을 받았어요.", 502, true, sessionId);
   };
@@ -167,6 +181,7 @@ export async function fetchChatHistory(mode: ChatMode, sessionId: string, signal
 
 /** Deletes the given user message and every later message in the session. */
 export async function deleteChatMessages(mode: ChatMode, sessionId: string, messageId: number, signal?: AbortSignal): Promise<void> {
+  if (!isMessageId(messageId)) throw new ChatClientError("메시지 번호를 확인해 주세요.", 400);
   await request(mode, `${sessionPath(sessionId)}messages/`, json("DELETE", { message_id: messageId }), signal, readEmpty);
 }
 
@@ -185,8 +200,8 @@ async function streamReply(mode: ChatMode, method: "POST" | "PUT", sessionId: st
   try {
     const init = json(method, body);
     init.headers = { ...init.headers as Record<string, string>, Accept: "text/event-stream" };
-    const result = await request(mode, `${sessionPath(sessionId)}messages/`, init, signal, response => readStream(response, sessionId, callbacks));
-    return { ...STATUS[mode], ...result, sessionId };
+    const result = await request(mode, `${sessionPath(sessionId)}messages/`, init, signal, response => readStream(response, sessionId, callbacks), null);
+    return { ...STATUS[mode], ...result, tools: result.tools.map(tool => ({ id: tool.id, toolName: tool.tool_name, status: tool.status })), sessionId };
   } catch (error) {
     if (error instanceof ChatClientError && error.sessionId === undefined) error.sessionId = sessionId;
     throw error;
@@ -201,6 +216,6 @@ export async function sendChatMessage(mode: ChatMode, body: ChatSendRequest, sig
 
 /** Replaces a persisted user message: the server drops it and everything after, then streams a new answer. */
 export async function editChatMessage(mode: ChatMode, body: ChatEditRequest, signal?: AbortSignal, callbacks: ChatStreamCallbacks = {}): Promise<ChatReply> {
-  if (!Number.isSafeInteger(body.messageId) || body.messageId < 1) throw new ChatClientError("메시지 번호를 확인해 주세요.", 400);
+  if (!isMessageId(body.messageId)) throw new ChatClientError("메시지 번호를 확인해 주세요.", 400);
   return streamReply(mode, "PUT", body.sessionId, { message_id: body.messageId, ...parseInput(body.content, body.context) }, signal, callbacks);
 }

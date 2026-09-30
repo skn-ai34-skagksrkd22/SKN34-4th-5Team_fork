@@ -16,37 +16,18 @@ export type ChatCourse = {
   title?: string;
   content?: string;
 };
-export type ChatProgressStatus = "started" | "completed" | "failed" | "interrupted" | "unknown";
-export type ChatProgressEvent = {
-  turnId: string;
-  sequenceNo: number;
-  operationId: string;
-  parentOperationId: string | null;
-  kind: "phase" | "retrieval" | "tool";
-  status: ChatProgressStatus;
-  label: string;
-  createdAt: string;
-  toolName: string | null;
-  toolCallId?: string | null;
-  arguments?: Record<string, unknown> | null;
-  result?: Record<string, unknown> | null;
-  truncated?: boolean;
-  summary: Record<string, unknown> | null;
-};
-export type ChatProgressOperation = Omit<ChatProgressEvent, "sequenceNo"> & {
-  startedAt?: string;
-  startSequenceNo?: number;
-  sequenceNo: number;
-};
-export type ChatMessageStatus = "pending" | "completed" | "stopped" | "failed";
-// id·status 는 서버에 저장된 메시지에만 있다. course·progress 는 화면 표시용이다.
+export type ChatToolStatus = "running" | "completed" | "failed";
+// serializer/message.py _public_tool(): {id, tool_name, status}. No arguments/results/metadata.
+export type ChatToolCall = { id: string; toolName: string; status: ChatToolStatus };
+export type ChatMessageStatus = "pending" | "completed" | "failed" | "stopped";
+// id·status·tools 는 서버에 저장된 메시지에만 있다 (id 는 서버가 만든 양의 정수). course 는 화면 표시용이다.
 export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   id?: number;
   status?: ChatMessageStatus;
   course?: ChatCourse;
-  progress?: ChatProgressOperation[];
+  tools?: ChatToolCall[];
 };
 export type ChatOrigin = { lat: number; lng: number };
 // origin: 코스 작성 화면에서 지도에 찍은 출발지. 백엔드 코스 챗봇이 이 지점부터 이어서 코스를 짠다.
@@ -57,6 +38,7 @@ export type ChatReply = ChatStatus & {
   reply: string;
   sessionId?: string;
   assistantMessageId?: number;
+  tools?: ChatToolCall[];
 };
 
 export const MAX_MESSAGE_LENGTH = 2000;

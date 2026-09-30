@@ -1,16 +1,13 @@
-"""travel 체인: 구장 주변 맛집 / 카페 / 숙박 / 관광 / 산책 / 공원 / 실내 놀거리 / 편의점."""
-from .common import build_domain_chain
-from llm.v1.rag.venue.prompts import CONTENT_RULES  # v1 내용 규칙 재사용
+"""주변 후보 조사 전문 Agent: 구장 주변 맛집·카페·관광·실내활동 후보 조사."""
+from .common import build_agent
 
-RULES = """구장 주변 장소 담당이다. 좌표는 get_stadium으로 확인한 뒤 search_places·search_tourism으로 찾고,
-<context>와 search_documents_tool 결과도 근거로 쓴다. 도구 결과에 없는 장소·영업시간은 만들지 않는다.
+TRAVEL_RESEARCH_RULES = """역할: 구장 주변 후보 조사 전문 에이전트.
+get_stadium 으로 좌표를 확인한 뒤 search_places·search_tourism·search_documents_tool 로 조건에 맞는 맛집·카페·관광·
+실내활동 후보를 찾는다. 날씨 조건이 있으면 get_weather 로 확인한다. 후보 목록과 근거만 돌려주고 최종 하루 일정은
+확정하지 않는다."""
 
-""" + CONTENT_RULES
+TOOLS = ("get_stadium", "search_places", "search_tourism", "search_documents_tool", "get_weather")
 
-CATEGORIES = ("FOOD_OUT", "CAFE", "SPOT")
 
-TOOLS = (
-    "get_stadium", "search_places", "search_tourism", "get_directions", "search_documents_tool",
-)
-
-travel_chain = build_domain_chain(RULES, CATEGORIES, TOOLS)
+def build(model, tools_by_name):
+    return build_agent(model, [tools_by_name[n] for n in TOOLS], TRAVEL_RESEARCH_RULES)

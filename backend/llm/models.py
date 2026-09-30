@@ -4,7 +4,6 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 from pgvector.django import VectorField, HnswIndex
-from llm.enum import ToolStatus , ChatRole , MessageStatus
 
 class Document(models.Model):
     title = models.CharField(max_length=255)
@@ -71,72 +70,11 @@ class ChatSession(models.Model):
         ]
 
 
-# 채팅 메세지 테이블
-class ChatMessage(models.Model):
-    session = models.ForeignKey(
-        ChatSession,
-        on_delete=models.CASCADE,
-        related_name="messages",
-    )
-    sequence_no = models.PositiveIntegerField()
-    role = models.CharField(
-        max_length=10,
-        choices=ChatRole.choices,
-    )
-    message = models.TextField()
-    status = models.CharField(
-        max_length=12,
-        choices=MessageStatus.choices,
-        default=MessageStatus.COMPLETED,
-    )
+class ChatThreadDeletion(models.Model):
+    """삭제된 ChatSession 의 checkpoint 삭제 outbox. 세션 삭제와 같은 트랜잭션에 쓰고, checkpoint 삭제 성공 뒤 지운다.
+
+    FK 가 아니다: 세션 행은 이미 없다. 남아 있는 행 = 아직 지우지 못한 thread (llm.service.chat_thread.purge_deleted_threads).
+    """
+    thread_id = models.UUIDField(primary_key=True)
+    token = models.UUIDField(default=uuid.uuid4)  # 예약마다 새 값. drain 은 읽은 token 일 때만 행을 지운다
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["session", "sequence_no"],
-                name="unique_active_message_sequence",
-            )
-        ]
-
-
-class ChatToolCall(models.Model):
-    message = models.ForeignKey(
-        ChatMessage,
-        on_delete=models.CASCADE,
-        related_name="tools",
-    )
-
-    tool_name = models.CharField(max_length=100)
-
-    status = models.CharField(
-        max_length=12,
-        choices=ToolStatus.choices,
-        default=ToolStatus.STARTED,
-    )
-
-    arguments = models.JSONField(
-        null=True,
-        blank=True,
-    )
-
-    result = models.JSONField(
-        null=True,
-        blank=True,
-    )
-
-    truncated = models.BooleanField(
-        default=False,
-    )
-
-    # Tool 호출 시작 시간
-    created_at = models.DateTimeField(
-        auto_now_add=True,
-    )
-
-    # Tool 실행 종료 시간
-    finished_at = models.DateTimeField(
-        null=True,
-        blank=True,
-    )

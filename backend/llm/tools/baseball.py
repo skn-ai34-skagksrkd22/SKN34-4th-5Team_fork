@@ -30,7 +30,10 @@ def create_baseball_tools(service: BaseballQueryService | None = None):
 
     def schema() -> dict:
         """SQL 작성 전에 public 야구 테이블, quoted_name, 컬럼, FK 관계를 조회한다."""
-        return service.get_baseball_schema()
+        try:
+            return service.get_baseball_schema()
+        except Exception as exc:
+            raise ToolException(f"[조회 실패] 스키마 조회 오류: {type(exc).__name__}") from None
 
     def select(sql: str, params: dict[str, Any] | None = None, max_rows: int = 100) -> dict:
         """스키마에 있는 quoted 테이블만 대상으로 단일 읽기 SELECT를 실행한다."""
@@ -48,6 +51,7 @@ def create_baseball_tools(service: BaseballQueryService | None = None):
                 "야구 SQL 작성의 첫 단계로 호출한다. public 스키마의 허용 테이블 quoted_name, "
                 "컬럼 타입, PK/null 여부, FK 관계를 반환한다."
             ),
+            handle_tool_error=True,
         ),
         StructuredTool.from_function(
             select,
